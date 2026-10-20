@@ -13,7 +13,7 @@
   moreutils,
   nodejs,
   pkg-config,
-  pnpm_11,
+  pnpm_12,
   fetchPnpmDeps,
   pnpmConfigHook,
 
@@ -31,13 +31,16 @@ rustPlatform.buildRustPackage {
 
   cargoHash = vendor-hash;
 
+  # Use the mihomo supplied by Nixpkgs; override it for a newer core.
+  patches = [ ./disable-alpha-core.patch ];
+
   pnpmDeps = fetchPnpmDeps {
     inherit
       pname
       version
       src
       ;
-    pnpm = pnpm_11;
+    pnpm = pnpm_12;
     fetcherVersion = 4;
     hash = pnpm-hash;
   };
@@ -47,17 +50,10 @@ rustPlatform.buildRustPackage {
   };
 
   postPatch = ''
-    # We disable the option to try to use the bleeding-edge version of mihomo
-    # If you need a newer version, you can override the mihomo input of the wrapped package
-    sed -i -e '/Mihomo Alpha/d' ./src/components/setting/mods/clash-core-viewer.tsx
-
-    # Set service.sock path
-    substituteInPlace $cargoDepsCopy/*/clash_verge_service_ipc-*/src/lib.rs \
-      --replace-fail "/tmp/verge/clash-verge-service.sock" "/run/clash-verge-rev/service.sock"
-    # Set verge-mihomo.sock path
-    substituteInPlace src-tauri/src/utils/dirs.rs \
-      --replace-fail 'once("/tmp")' 'once(&std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| std::env::var("UID").map(|uid| format!("/run/user/{}", uid)).unwrap_or_else(|_| "/tmp".to_string())))' \
-      --replace-fail 'join("verge")' 'join("clash-verge-rev")'
+    # This macOS-only patch is unused by Cargo.lock but Cargo still tries to
+    # fetch its unvendored Git source during offline builds.
+    substituteInPlace Cargo.toml \
+      --replace-fail 'tray-icon = { git = "https://github.com/Tunglies/tray-icon.git", branch = "fix/macos-27-click-reentrancy" }' ""
 
     substituteInPlace $cargoDepsCopy/*/libappindicator-sys-*/src/lib.rs \
       --replace-fail "libayatana-appindicator3.so.1" "${libayatana-appindicator}/lib/libayatana-appindicator3.so.1"
@@ -87,7 +83,7 @@ rustPlatform.buildRustPackage {
     nodejs
     pkg-config
     pnpmConfigHook
-    pnpm_11
+    pnpm_12
   ];
 
   buildInputs = [

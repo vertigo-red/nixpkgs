@@ -1,0 +1,15 @@
+diff --git a/src/components/setting/mods/clash-core-viewer.tsx b/src/components/setting/mods/clash-core-viewer.tsx
+--- a/src/components/setting/mods/clash-core-viewer.tsx
++++ b/src/components/setting/mods/clash-core-viewer.tsx
+@@ -30,11 +30,6 @@ const VALID_CORE = [
+     core: 'verge-mihomo',
+     chipKey: 'settings.modals.clashCore.variants.release',
+   },
+-  {
+-    name: 'Mihomo Alpha',
+-    core: 'verge-mihomo-alpha',
+-    chipKey: 'settings.modals.clashCore.variants.alpha',
+-  },
+ ]
+
+ export function ClashCoreViewer({ ref }: { ref?: Ref<DialogRef> }) {
