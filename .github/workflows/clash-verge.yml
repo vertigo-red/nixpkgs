@@ -1,0 +1,123 @@
+name: Build Clash Verge
+run-name: Clash Verge 2.5.8 for x86_64-linux
+
+on:
+  push:
+    branches:
+      - ci-builds
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clash-verge-cachix-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  BUILD_TARGET: github:vertigo-red/nixpkgs/f5118a6a72a432c2b13f1bc8e79f09e755464266#clash-verge-rev
+  CACHIX_CACHE: nixpkgs-pr-build-test
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    if: github.repository == 'vertigo-red/nixpkgs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    steps:
+      - name: Check cache configuration
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$CACHIX_AUTH_TOKEN" ]]; then
+            echo '::error::Repository secret CACHIX_AUTH_TOKEN is missing.'
+            exit 1
+          fi
+          curl --fail --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 \
+            "https://${CACHIX_CACHE}.cachix.org/nix-cache-info"
+
+      - name: Free disk space on the runner
+        run: |
+          set -euo pipefail
+          df -h /
+          # Nix provides the build tools; these preinstalled SDKs are unused.
+          sudo rm -rf \
+            /usr/local/lib/android \
+            /usr/share/dotnet \
+            /usr/share/swift \
+            /usr/local/.ghcup \
+            /opt/ghc \
+            /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          df -h /
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            sandbox = true
+            max-jobs = 1
+            cores = 2
+            log-lines = 100
+
+      - name: Configure Cachix
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: nixpkgs-pr-build-test
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          # Publish the finished runtime closure explicitly after checks pass.
+          skipPush: true
+
+      - name: Build package with the recipe's tests
+        run: |
+          set -euo pipefail
+          nix build -L --print-out-paths --max-jobs 1 --cores 2 "$BUILD_TARGET"
+          test -x ./result/bin/clash-verge
+          test -x ./result/bin/clash-verge-service
+          test -x ./result/bin/verge-mihomo
+          nix path-info --closure-size ./result
+
+      - name: Publish package and runtime dependencies
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          cachix push "$CACHIX_CACHE" "$(readlink -f ./result)"
+
+      - name: Verify cache and write download instructions
+        run: |
+          set -euo pipefail
+          store_path="$(readlink -f ./result)"
+          nix path-info --store "https://${CACHIX_CACHE}.cachix.org" "$store_path"
+          nix config show --json | jq -r --arg cache "$CACHIX_CACHE" '
+            .["trusted-public-keys"].value
+            | (if type == "array" then .[] else split(" ")[] end)
+            | select(startswith($cache + ".cachix.org-"))
+          ' > "$RUNNER_TEMP/cachix-public-keys"
+          test -s "$RUNNER_TEMP/cachix-public-keys"
+          {
+            printf '## Clash Verge 2.5.8\n\n'
+            printf 'Built and published: `%s`\n\n' "$store_path"
+            printf 'Cache: https://%s.cachix.org\n\n' "$CACHIX_CACHE"
+            printf '### NixOS cache configuration\n\n```nix\nnix.settings = {\n'
+            printf '  extra-substituters = [ "https://%s.cachix.org" ];\n' "$CACHIX_CACHE"
+            printf '  extra-trusted-public-keys = [\n'
+            while IFS= read -r public_key; do
+              printf '    "%s"\n' "$public_key"
+            done < "$RUNNER_TEMP/cachix-public-keys"
+            printf '  ];\n};\n```\n\n'
+            printf 'Apply the cache configuration before downloading the package.\n\n'
+            printf '### Download and run on x86_64-linux\n\n```bash\n'
+            printf "nix --extra-experimental-features 'nix-command flakes' build -L --max-jobs 0 '%s'\n" "$BUILD_TARGET"
+            printf './result/bin/clash-verge\n```\n\n'
+            printf 'For an upstream PR, use master; keep ci-builds separate.\n'
+            printf 'Test GUI, the updated NixOS module, and TUN on NixOS.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Report disk usage
+        if: always()
+        run: df -h /
