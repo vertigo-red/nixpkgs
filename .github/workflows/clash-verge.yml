@@ -60,8 +60,8 @@ jobs:
           github_access_token: ${{ secrets.GITHUB_TOKEN }}
           extra_nix_config: |
             sandbox = true
-            max-jobs = 1
-            cores = 2
+            max-jobs = auto
+            cores = 0
             log-lines = 100
 
       - name: Configure Cachix
@@ -75,7 +75,9 @@ jobs:
       - name: Build package with the recipe's tests
         run: |
           set -euo pipefail
-          nix build -L --print-out-paths --max-jobs 1 --cores 2 "$BUILD_TARGET"
+          nproc
+          free -h
+          nix build -L --print-out-paths "$BUILD_TARGET"
           test -x ./result/bin/clash-verge
           test -x ./result/bin/clash-verge-service
           test -x ./result/bin/verge-mihomo
