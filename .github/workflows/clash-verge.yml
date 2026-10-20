@@ -11,7 +11,7 @@ permissions:
 
 concurrency:
   group: clash-verge-cachix-${{ github.ref }}
-  cancel-in-progress: false
+  cancel-in-progress: true
 
 env:
   BUILD_TARGET: github:vertigo-red/nixpkgs/f5118a6a72a432c2b13f1bc8e79f09e755464266#clash-verge-rev
@@ -92,7 +92,8 @@ jobs:
         run: |
           set -euo pipefail
           store_path="$(readlink -f ./result)"
-          nix path-info --store "https://${CACHIX_CACHE}.cachix.org" "$store_path"
+          nix path-info --option narinfo-cache-negative-ttl 0 \
+            --store "https://${CACHIX_CACHE}.cachix.org" "$store_path"
           nix config show --json | jq -r --arg cache "$CACHIX_CACHE" '
             .["trusted-public-keys"].value
             | (if type == "array" then .[] else split(" ")[] end)
