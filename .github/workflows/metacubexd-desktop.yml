@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  SOURCE_REV: 3133632b48ba958aaefd8e394f9ad6fb1aa6be93
+  SOURCE_REV: c53af52de31691b3f9ffb81e778fb5bd4d0cb19d
   CACHIX_CACHE: nixpkgs-pr-build-test
   CLASH_STORE_PATH: /nix/store/s3n4jrsgyprymz808c4hi90n7swhacls-clash-verge-rev-2.5.8
 
@@ -48,8 +48,10 @@ jobs:
           set -euo pipefail
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
           sudo docker image prune --all --force
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends xvfb xauth dbus-x11
+          if ! command -v xvfb-run || ! command -v xauth || ! command -v dbus-run-session; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends xvfb xauth dbus-x11
+          fi
           test -c /dev/kvm
           sudo chmod a+rw /dev/kvm
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
