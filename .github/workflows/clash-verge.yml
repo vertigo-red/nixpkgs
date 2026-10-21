@@ -16,7 +16,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  BUILD_TARGET: github:vertigo-red/nixpkgs/f5118a6a72a432c2b13f1bc8e79f09e755464266#clash-verge-rev
+  SOURCE_BRANCH: clash-verge-rev-update
   CACHIX_CACHE: nixpkgs-pr-build-test
 
 defaults:
@@ -40,6 +40,21 @@ jobs:
           fi
           curl --fail --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 \
             "https://${CACHIX_CACHE}.cachix.org/nix-cache-info"
+
+      - name: Resolve source branch and pin this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          source_rev="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SOURCE_BRANCH}" --jq '.sha')"
+          if [[ ! "$source_rev" =~ ^[0-9a-f]{40}$ ]]; then
+            echo '::error::The packaging branch did not resolve to a full commit SHA.'
+            exit 1
+          fi
+          printf 'SOURCE_REV=%s\n' "$source_rev" >> "$GITHUB_ENV"
+          printf 'BUILD_TARGET=github:%s/%s#clash-verge-rev\n' \
+            "$GITHUB_REPOSITORY" "$source_rev" >> "$GITHUB_ENV"
+          printf 'Building %s at %s\n' "$SOURCE_BRANCH" "$source_rev"
 
       - name: Free disk space on the runner
         run: |
@@ -106,6 +121,7 @@ jobs:
           test -s "$RUNNER_TEMP/cachix-public-keys"
           {
             printf '## Clash Verge 2.5.8\n\n'
+            printf 'Source branch: `%s`; pinned revision: `%s`\n\n' "$SOURCE_BRANCH" "$SOURCE_REV"
             printf 'Built and published: `%s`\n\n' "$store_path"
             printf 'Cache: https://%s.cachix.org\n\n' "$CACHIX_CACHE"
             printf '### NixOS cache configuration\n\n```nix\nnix.settings = {\n'
@@ -119,7 +135,7 @@ jobs:
             printf '### Download and run on x86_64-linux\n\n```bash\n'
             printf "nix --extra-experimental-features 'nix-command flakes' build -L --max-jobs 0 '%s'\n" "$BUILD_TARGET"
             printf './result/bin/clash-verge\n```\n\n'
-            printf 'For an upstream PR, use master; keep ci-builds separate.\n'
+            printf 'For an upstream PR, use `%s`; keep ci-builds separate.\n' "$SOURCE_BRANCH"
             printf 'Test GUI, the updated NixOS module, and TUN on NixOS.\n'
           } >> "$GITHUB_STEP_SUMMARY"
 
