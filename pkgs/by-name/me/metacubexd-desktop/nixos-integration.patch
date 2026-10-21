@@ -1,0 +1,287 @@
+Subject: [PATCH] Use the declarative NixOS TUN helper and packaged Mihomo
+
+Keep resources with the application, use a runtime authentication token,
+and prevent a capability-bearing helper from running arbitrary programs.
+
+--- a/apps/desktop/src/main/index.ts
++++ b/apps/desktop/src/main/index.ts
+@@ -5,7 +5,6 @@
+ } from '@metacubexd/agent/types'
+ import type { Tray } from 'electron'
+ import type { ControlServer } from './control-server'
+-import type { HelperInstallOptions } from './helper/installer'
+ import type { HelperKernelStartOptions } from './helper/server'
+ import type { FailedHotkey } from './hotkeys'
+ import type { FsLike } from './paths'
+@@ -57,9 +56,7 @@
+ } from './desktop-settings'
+ import { pickFreePorts } from './free-port'
+ import { createHelperClient } from './helper/client'
+-import { createHelperElevate } from './helper/elevate'
+-import { createHelperInstaller } from './helper/installer'
+-import { resolveHelperEntry } from './helper/paths'
++import { createNixosHelperInstaller, readNixosHelperSecret, NIXOS_HELPER_INSTRUCTIONS } from './nixos-helper'
+ import {
+   DEFAULT_HOTKEYS,
+   loadHotkeyBindings,
+@@ -108,66 +105,22 @@
+   writeFileSync: (p, data) => writeFileSync(p, data, 'utf8'),
+ }
+
+-// TUN privileged-helper service identifiers (LaunchDaemon label on macOS,
+-// systemd unit / Windows service name on linux/win). Stable so install/uninstall
+-// + isInstalled all address the same registered service.
+-const HELPER_LABEL = 'io.github.metacubexd.helper'
+-const HELPER_SERVICE_NAME = 'metacubexd-helper'
+-
+ const execAsync = promisify(nodeExec)
+
+-/**
+- * Injected un-elevated command runner for the installer's cheap isInstalled
+- * probe (never needs privilege). Real shell-out — only ever invoked when the
+- * user enables TUN, never at boot and never in tests.
+- */
+-const helperExec = (cmd: string): Promise<{ stdout: string; stderr: string }> =>
+-  execAsync(cmd)
+-
+-/**
+- * Injected elevation runner: run the ONE privileged install/uninstall script
+- * with administrator privileges (osascript / pkexec / UAC RunAs). Only ever
+- * invoked on an explicit user TUN enable — never at boot, never in tests.
+- * See `helper/elevate.ts` — a plain exec here was the #2116 Windows TUN 500.
+- */
+-const helperElevate = createHelperElevate({
+-  platform: process.platform,
+-  exec: helperExec,
+-})
+-
+-/**
+- * Per-OS local socket / named-pipe path + root-owned secret-file path for the
+- * privileged helper. mac/linux: a unix domain socket under a writable dir;
+- * Windows: a `\\.\pipe\...` named pipe. The secret file is the root-owned,
+- * ROOT-ONLY (0600 / SYSTEM-ACL'd) path the installer writes the shared secret
+- * to and the helper reads as root — distinct from the app's own user-owned copy
+- * under userData (helper-secret.txt). It is never world-readable.
+- */
+-function resolveHelperPaths(): {
+-  socketPath: string
+-  secretFile: string
+-} {
+-  if (process.platform === 'win32') {
+-    return {
+-      socketPath: `\\\\.\\pipe\\${HELPER_SERVICE_NAME}`,
+-      secretFile: join(
+-        process.env.ProgramData || 'C:\\ProgramData',
+-        HELPER_SERVICE_NAME,
+-        'helper.secret',
+-      ),
+-    }
+-  }
+-  if (process.platform === 'darwin') {
+-    return {
+-      socketPath: `/tmp/${HELPER_SERVICE_NAME}.sock`,
+-      secretFile: `/Library/Application Support/${HELPER_LABEL}/helper.secret`,
+-    }
+-  }
++// NixOS owns service installation and keeps the authentication token out of
++// both the Nix store and the user's persistent profile data.
++function resolveHelperPaths(): { socketPath: string; secretFile: string } {
+   return {
+-    socketPath: `/run/${HELPER_SERVICE_NAME}.sock`,
+-    secretFile: `/etc/${HELPER_SERVICE_NAME}/helper.secret`,
+-  }
+-}
++    socketPath: '/run/metacubexd-helper/helper.sock',
++    secretFile: '/run/metacubexd-helper/secret',
++  }
++}
++
++// Keep the data directory stable when launching with Nixpkgs' Electron.
++app.setName('metacubexd')
++const nixosUserData = join(app.getPath('appData'), 'metacubexd')
++mkdirSync(nixosUserData, { recursive: true })
++app.setPath('userData', nixosUserData)
+
+ let win: BrowserWindow | null = null
+ let tray: Tray | null = null
+@@ -221,9 +174,9 @@
+ }
+
+ function defaultConfigSource(): string {
+-  // packaged -> process.resourcesPath/default-config.yaml ; dev -> repo resources
++  // packaged -> join(app.getAppPath(), 'resources')/default-config.yaml ; dev -> repo resources
+   return app.isPackaged
+-    ? join(process.resourcesPath, 'default-config.yaml')
++    ? join(join(app.getAppPath(), 'resources'), 'default-config.yaml')
+     : join(app.getAppPath(), 'resources', 'default-config.yaml')
+ }
+
+@@ -259,7 +212,7 @@
+   const binaryPath = resolveMihomoBinary({
+     platform: process.platform,
+     isPackaged: app.isPackaged,
+-    resourcesPath: process.resourcesPath,
++    resourcesPath: join(app.getAppPath(), 'resources'),
+     appPath: app.getAppPath(),
+     userOverride,
+   })
+@@ -459,33 +412,7 @@
+   const tunPaths = resolveHelperPaths()
+   // Where the resolved TUN mode is persisted for the cold-start prompt.
+   const tunStatePath = join(userData, 'tun-state.json')
+-  // Per-install shared secret stamped onto every helper IPC request. Persisted so
+-  // it stays stable across sessions (the installer writes it root-owned; the
+-  // client reads it back from here). Best-effort read; first run mints one.
+-  const helperSecretPath = join(userData, 'helper-secret.txt')
+-  const helperSecret = existsSync(helperSecretPath)
+-    ? readFileSync(helperSecretPath, 'utf8').trim()
+-    : (() => {
+-        const s = makeToken()
+-        try {
+-          writeFileSync(helperSecretPath, s, 'utf8')
+-        } catch {
+-          /* best-effort; a failed persist just re-mints next launch */
+-        }
+-        return s
+-      })()
+-  // Hoisted out of createTunRuntime so the TUN auto-restore gate below can
+-  // probe isInstalled() (cheap, un-elevated) without a second installer.
+-  const helperInstaller = createHelperInstaller({
+-    platform: process.platform,
+-    exec: helperExec,
+-    elevate: helperElevate,
+-    paths: {
+-      label: HELPER_LABEL,
+-      serviceName: HELPER_SERVICE_NAME,
+-      secretPath: tunPaths.secretFile,
+-    },
+-  })
++  const helperInstaller = createNixosHelperInstaller(tunPaths.socketPath)
+   const tunRuntime = createTunRuntime({
+     installer: helperInstaller,
+     // Lazily dial the helper IPC socket only on the privileged relaunch —
+@@ -495,7 +422,7 @@
+     connectClient: (onDisconnect) =>
+       createHelperClient({
+         socketPath: tunPaths.socketPath,
+-        secret: helperSecret,
++        secret: readNixosHelperSecret(tunPaths.secretFile),
+         onDisconnect,
+       }),
+     supervisor: agent.supervisor,
+@@ -518,19 +445,9 @@
+       homeDir: paths.homeDir,
+       configPath: paths.activeConfigPath,
+     }),
+-    installOptions: (): HelperInstallOptions => ({
+-      electronBin: process.execPath,
+-      // Where the privileged service finds the helper bundle to run. Packaged:
+-      // the asar-UNPACKED copy under resourcesPath (a file inside app.asar can't
+-      // be spawned by an external service); dev: <appPath>/out/helper/index.js.
+-      helperEntry: resolveHelperEntry({
+-        isPackaged: app.isPackaged,
+-        resourcesPath: process.resourcesPath,
+-        appPath: app.getAppPath(),
+-      }),
+-      socketPath: tunPaths.socketPath,
+-      secret: helperSecret,
+-    }),
++    installOptions: () => {
++      throw new Error(NIXOS_HELPER_INSTRUCTIONS)
++    },
+     // Persist the resolved mode so a future session knows the last state. We do
+     // NOT auto-restore TUN at boot (that would silently elevate); the cold-start
+     // prompt is surfaced below + handled by the UI (B-4).
+--- a/apps/desktop/src/helper/index.ts
++++ b/apps/desktop/src/helper/index.ts
+@@ -22,7 +22,7 @@
+   HelperKernelStartOptions,
+ } from '../main/helper/server'
+ import { spawn as nodeSpawn } from 'node:child_process'
+-import { readFileSync, statSync } from 'node:fs'
++import { readFileSync, realpathSync, statSync } from 'node:fs'
+ import { isAbsolute } from 'node:path'
+ import { HELPER_PROTOCOL_VERSION } from '../main/helper/protocol'
+ import { createHelperServer } from '../main/helper/server'
+@@ -184,11 +184,18 @@
+         statPath,
+         platform,
+       )
++      // A capability-bearing NixOS service must never execute downloaded or
++      // user-supplied programs. Resolve the application's store symlink before
++      // comparing it with the Mihomo selected by the package.
++      const pinnedBinary = process.env.MCXD_NIX_MIHOMO
++      if (pinnedBinary && realpathSync(binaryPath) !== realpathSync(pinnedBinary)) {
++        throw new Error('helper: TUN requires the Mihomo kernel provided by NixOS')
++      }
+       // Replace any prior process first so we never leak a privileged kernel.
+       if (child) await this.stop()
+
+       const proc = spawn(binaryPath, ['-d', homeDir, '-f', configPath], {
+-        stdio: 'ignore',
++        stdio: process.env.MCXD_NIX_MIHOMO ? 'inherit' : 'ignore',
+       })
+       child = proc
+       spawned = false
+--- /dev/null
++++ b/apps/desktop/src/main/nixos-helper.ts
+@@ -0,0 +1,24 @@
++import type { HelperInstaller } from './helper/installer'
++import { existsSync, readFileSync } from 'node:fs'
++
++export const NIXOS_HELPER_INSTRUCTIONS =
++  'Enable programs.metacubexd-desktop.tunMode and set programs.metacubexd-desktop.user to your login, then rebuild NixOS. Manage the helper with NixOS, not the in-app installer.'
++
++export function readNixosHelperSecret(secretFile: string): string {
++  try {
++    const secret = readFileSync(secretFile, 'utf8').trim()
++    if (secret) return secret
++  } catch {
++    // Proxy-only operation remains available without the optional helper.
++  }
++  throw new Error(NIXOS_HELPER_INSTRUCTIONS)
++}
++
++export function createNixosHelperInstaller(socketPath: string): HelperInstaller {
++  return {
++    isInstalled: async () => existsSync(socketPath),
++    installedVersion: async () => undefined,
++    install: async () => { throw new Error(NIXOS_HELPER_INSTRUCTIONS) },
++    uninstall: async () => { throw new Error(NIXOS_HELPER_INSTRUCTIONS) },
++  }
++}
+--- /dev/null
++++ b/apps/desktop/src/main/__tests__/nixos-helper.spec.ts
+@@ -0,0 +1,32 @@
++import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
++import { tmpdir } from 'node:os'
++import { join } from 'node:path'
++import { afterEach, describe, expect, it } from 'vitest'
++import { createNixosHelperInstaller, readNixosHelperSecret } from '../nixos-helper'
++
++const directory = mkdtempSync(join(tmpdir(), 'mcxd-nixos-'))
++afterEach(() => rmSync(join(directory, 'secret'), { force: true }))
++
++describe('NixOS helper integration', () => {
++  it('rereads the token after a service restart', () => {
++    const file = join(directory, 'secret')
++    writeFileSync(file, 'first\n')
++    expect(readNixosHelperSecret(file)).toBe('first')
++    writeFileSync(file, 'second\n')
++    expect(readNixosHelperSecret(file)).toBe('second')
++  })
++
++  it('reports how to enable the module for missing and empty tokens', () => {
++    const file = join(directory, 'secret')
++    expect(() => readNixosHelperSecret(file)).toThrow('programs.metacubexd-desktop.tunMode')
++    writeFileSync(file, '')
++    expect(() => readNixosHelperSecret(file)).toThrow('programs.metacubexd-desktop.tunMode')
++  })
++
++  it('never installs or removes a declarative service', async () => {
++    const installer = createNixosHelperInstaller(join(directory, 'missing.sock'))
++    expect(await installer.isInstalled()).toBe(false)
++    await expect(installer.install({} as never)).rejects.toThrow('rebuild NixOS')
++    await expect(installer.uninstall()).rejects.toThrow('rebuild NixOS')
++  })
++})

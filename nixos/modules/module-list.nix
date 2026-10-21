@@ -273,6 +273,7 @@
   ./programs/localsend.nix
   ./programs/mdevctl.nix
   ./programs/mepo.nix
+  ./programs/metacubexd-desktop.nix
   ./programs/mininet.nix
   ./programs/minipro.nix
   ./programs/miriway.nix
