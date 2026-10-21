@@ -296,6 +296,7 @@ in
   artalk = runTest ./artalk.nix;
   asynch = runTest ./asynch.nix;
   atd = runTest ./atd.nix;
+  atlantis = runTest ./atlantis.nix;
   atop = import ./atop.nix { inherit pkgs runTest; };
   atticd = runTest ./atticd.nix;
   attr = pkgs.callPackage ./attr.nix { };
@@ -1826,6 +1827,7 @@ in
   syncthing-relay = runTest ./syncthing/relay.nix;
   sysfs = runTest ./sysfs.nix;
   sysinit-reactivation = runTest ./sysinit-reactivation.nix;
+  syslog-ng = runTest ./syslog-ng.nix;
   system-services-compliance = recurseIntoAttrs (
     import ./system-services-compliance.nix {
       inherit
