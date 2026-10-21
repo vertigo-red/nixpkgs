@@ -18,8 +18,10 @@ Use the login of an existing normal user in `user`; for NixOS-WSL this may be
 ```nix
 { pkgs, ... }:
 let
-  source = builtins.fetchTarball
-    "https://github.com/vertigo-red/nixpkgs/archive/c53af52de31691b3f9ffb81e778fb5bd4d0cb19d.tar.gz";
+  source = builtins.fetchTarball {
+    url = "https://github.com/vertigo-red/nixpkgs/archive/c53af52de31691b3f9ffb81e778fb5bd4d0cb19d.tar.gz";
+    sha256 = "sha256-/Z/MWnBe02zD/oOy4fH4SctNYpHXuIaeiiL5kryd0Mw=";
+  };
   desktopPkgs = import source {
     system = pkgs.stdenv.hostPlatform.system;
   };
@@ -87,6 +89,11 @@ environment. System-proxy support for KDE is a separate upstream feature.
 The CI workflow builds with Nix sandboxing, runs the upstream desktop/agent/editor
 unit tests, opens the actual Electron UI and checks its preload bridge and local
 agent/Mihomo APIs, then runs a NixOS VM test with a real TUN device.
+
+[Verified successful run](https://github.com/vertigo-red/nixpkgs/actions/runs/39560253447):
+724 unit tests passed; one Windows-specific test was skipped on Linux. The GUI
+smoke test and NixOS VM test both passed. Published output:
+`/nix/store/iacxz7g7gbhlysx3kmmi9nk4lx23b32m-metacubexd-desktop-1.273.1`.
 
 The VM test also checks incorrect tokens, attempts to run an unapproved binary,
 access by another user, HTTP/SOCKS proxying, disconnection cleanup and service
