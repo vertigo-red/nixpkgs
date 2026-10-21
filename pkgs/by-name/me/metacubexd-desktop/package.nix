@@ -36,7 +36,7 @@ stdenv.mkDerivation (finalAttrs: {
     inherit (finalAttrs) pname version src;
     pnpm = pnpm_10;
     fetcherVersion = 4;
-    hash = lib.fakeHash;
+    hash = "sha256-BWQzP6rNVMDF4nitgp//z/8el6RXOzRoUD9sns/w3U4=";
   };
 
   nativeBuildInputs = [
@@ -112,6 +112,7 @@ stdenv.mkDerivation (finalAttrs: {
 
     makeWrapper ${lib.getExe electron_43-bin} "$out/bin/metacubexd-desktop" \
       --add-flags "$appDir" \
+      --set MIHOMO_VERSION "v${mihomo.version}" \
       --prefix PATH : ${lib.makeBinPath [ glib ]} \
       --add-flags "\''${NIXOS_OZONE_WL:+\''${WAYLAND_DISPLAY:+--ozone-platform-hint=auto --enable-features=WaylandWindowDecorations --enable-wayland-ime=true}}" \
       "''${gappsWrapperArgs[@]}"

@@ -5,7 +5,11 @@ and prevent a capability-bearing helper from running arbitrary programs.
 
 --- a/apps/desktop/src/main/index.ts
 +++ b/apps/desktop/src/main/index.ts
-@@ -5,7 +5,6 @@
+@@ -1,11 +1,9 @@
+ import type {
+-  KernelManager,
+   SystemProxyController,
+   TunController,
  } from '@metacubexd/agent/types'
  import type { Tray } from 'electron'
  import type { ControlServer } from './control-server'
@@ -13,7 +17,7 @@ and prevent a capability-bearing helper from running arbitrary programs.
  import type { HelperKernelStartOptions } from './helper/server'
  import type { FailedHotkey } from './hotkeys'
  import type { FsLike } from './paths'
-@@ -57,9 +56,7 @@
+@@ -57,9 +55,7 @@
  } from './desktop-settings'
  import { pickFreePorts } from './free-port'
  import { createHelperClient } from './helper/client'
@@ -24,7 +28,15 @@ and prevent a capability-bearing helper from running arbitrary programs.
  import {
    DEFAULT_HOTKEYS,
    loadHotkeyBindings,
-@@ -108,66 +105,22 @@
+@@ -67,7 +63,6 @@
+   sanitizeHotkeyBindings,
+   saveHotkeyBindings,
+ } from './hotkeys'
+-import { createKernelManager } from './kernel-manager'
+ import { createLogFileSink } from './log-file'
+ import { createLoginItemController } from './login-item'
+ import { createKernelCrashWatcher, createNotifier } from './notifier'
+@@ -108,66 +103,22 @@
    writeFileSync: (p, data) => writeFileSync(p, data, 'utf8'),
  }
 
@@ -104,7 +116,7 @@ and prevent a capability-bearing helper from running arbitrary programs.
 
  let win: BrowserWindow | null = null
  let tray: Tray | null = null
-@@ -221,9 +174,9 @@
+@@ -221,9 +172,9 @@
  }
 
  function defaultConfigSource(): string {
@@ -116,16 +128,83 @@ and prevent a capability-bearing helper from running arbitrary programs.
      : join(app.getAppPath(), 'resources', 'default-config.yaml')
  }
 
-@@ -259,7 +212,7 @@
+@@ -251,17 +202,13 @@
+   desktopSettingsPath = join(userData, 'desktop-settings.json')
+   desktopSettings = loadDesktopSettings(desktopSettingsPath, fsAdapter)
+
+-  // Resolve mihomo binary (user override read from a settings file if present).
+-  const overridePath = join(userData, 'mihomo-bin-override.txt')
+-  const userOverride = existsSync(overridePath)
+-    ? readFileSync(overridePath, 'utf8').trim()
+-    : undefined
++  // Kernel updates are handled by Nix together with the capability-bearing
++  // helper. Never restore an executable downloaded by an earlier app build.
    const binaryPath = resolveMihomoBinary({
      platform: process.platform,
      isPackaged: app.isPackaged,
 -    resourcesPath: process.resourcesPath,
 +    resourcesPath: join(app.getAppPath(), 'resources'),
      appPath: app.getAppPath(),
-     userOverride,
+-    userOverride,
    })
-@@ -459,33 +412,7 @@
+   // chmod +x defensively on unix (asar/zip extraction may drop the bit).
+   if (process.platform !== 'win32' && existsSync(binaryPath)) {
+@@ -358,25 +305,7 @@
+     setDefaultBypass,
+   }
+
+-  // Kernel version management needs the supervisor that createAgent builds
+-  // internally — chicken-and-egg. We hand createAgent a stable delegate (truthy
+-  // so the 'kernel-version' feature + routes register) and back it with the real
+-  // KernelManager once the agent (and its supervisor) exists. createAgent returns
+-  // synchronously and no /api/control request fires before boot() completes, so
+-  // realKernelManager is always set by request time.
+-  let realKernelManager: KernelManager | null = null
+-  const kernelManager: KernelManager = {
+-    listVersions: () => {
+-      if (!realKernelManager) throw new Error('kernel manager not ready')
+-      return realKernelManager.listVersions()
+-    },
+-    switch: (version) => {
+-      if (!realKernelManager) throw new Error('kernel manager not ready')
+-      return realKernelManager.switch(version)
+-    },
+-  }
+-
+-  // Same chicken-and-egg as kernelManager: the TUN runtime needs agent.supervisor
++  // The TUN runtime needs agent.supervisor
+   // + agent.profiles.setSection, but createAgent needs a tunController to register
+   // the 'tun' feature + /api/control/tun routes. Hand createAgent a stable
+   // delegate (truthy so 'tun' goes live) and back it with the real B-3 runtime
+@@ -429,26 +358,13 @@
+     // Inject the OS proxy controller; enables the capability-gated
+     // /api/control/sysproxy routes + the 'system-proxy' feature flag.
+     systemProxy,
+-    // Inject the kernel version manager (delegate); enables the capability-gated
+-    // /api/control/kernel/* routes + the 'kernel-version' feature flag.
+-    kernelManager,
+     // Inject the TUN controller (delegate); enables the capability-gated
+     // /api/control/tun routes + the 'tun' feature flag. Backed by the real B-3
+     // runtime controller built below once the supervisor/profiles exist.
+     tunController,
+   })
+
+-  // Now that the supervisor exists, build the real manager. Downloaded kernels
+-  // land in <userData>/kernels/<version>; switching writes the override file
+-  // (overridePath) for cold-start persistence then live-swaps the supervisor.
+-  realKernelManager = createKernelManager({
+-    supervisor: agent.supervisor,
+-    os: process.platform,
+-    arch: process.arch,
+-    kernelsDir: join(userData, 'kernels'),
+-    overridePath,
+-    githubToken: process.env.GITHUB_TOKEN,
+-  })
++  // Kernels are managed by Nix; omitting kernelManager hides in-app downloads.
+
+   // Wire the REAL TUN runtime (B-3): the B-1 state machine driving the B-2 helper
+   // client + the B3-T1 installer + the agent setSection primitive + the
+@@ -459,33 +375,7 @@
    const tunPaths = resolveHelperPaths()
    // Where the resolved TUN mode is persisted for the cold-start prompt.
    const tunStatePath = join(userData, 'tun-state.json')
@@ -160,7 +239,7 @@ and prevent a capability-bearing helper from running arbitrary programs.
    const tunRuntime = createTunRuntime({
      installer: helperInstaller,
      // Lazily dial the helper IPC socket only on the privileged relaunch —
-@@ -495,7 +422,7 @@
+@@ -495,7 +385,7 @@
      connectClient: (onDisconnect) =>
        createHelperClient({
          socketPath: tunPaths.socketPath,
@@ -169,7 +248,7 @@ and prevent a capability-bearing helper from running arbitrary programs.
          onDisconnect,
        }),
      supervisor: agent.supervisor,
-@@ -518,19 +445,9 @@
+@@ -518,19 +408,9 @@
        homeDir: paths.homeDir,
        configPath: paths.activeConfigPath,
      }),

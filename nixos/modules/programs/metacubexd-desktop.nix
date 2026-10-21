@@ -35,8 +35,8 @@ in
 
         The helper runs as this user with network capabilities. Its
         authentication token and socket are accessible only to this user.
-        The helper can execute only the Mihomo provided by the package;
-        kernels downloaded through the application cannot be used for TUN.
+        The helper can execute only the Mihomo provided by the package.
+        Kernel updates are managed through Nix.
       '';
     };
 
@@ -77,6 +77,7 @@ in
     ];
 
     networking.firewall.checkReversePath = lib.mkIf cfg.tunMode (lib.mkDefault "loose");
+    boot.kernelModules = lib.mkIf cfg.tunMode [ "tun" ];
 
     systemd.services.metacubexd-helper = lib.mkIf cfg.tunMode {
       description = "MetaCubeXD TUN helper";
@@ -124,6 +125,7 @@ in
           "AF_INET"
           "AF_INET6"
           "AF_NETLINK"
+          "AF_PACKET"
         ];
         SystemCallArchitectures = "native";
       };
