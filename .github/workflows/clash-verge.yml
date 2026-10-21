@@ -5,6 +5,8 @@ on:
   push:
     branches:
       - ci-builds
+    paths:
+      - .github/workflows/clash-verge.yml
 
 permissions:
   contents: read

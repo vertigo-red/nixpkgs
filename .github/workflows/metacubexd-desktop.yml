@@ -1,0 +1,147 @@
+name: Build MetaCubeXD desktop
+run-name: MetaCubeXD desktop 1.273.1 for x86_64-linux
+
+on:
+  push:
+    branches: [ci-builds]
+    paths:
+      - .github/workflows/metacubexd-desktop.yml
+      - .github/scripts/metacubexd-smoke.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: metacubexd-desktop-cachix
+  cancel-in-progress: true
+
+env:
+  SOURCE_REV: 3133632b48ba958aaefd8e394f9ad6fb1aa6be93
+  CACHIX_CACHE: nixpkgs-pr-build-test
+  CLASH_STORE_PATH: /nix/store/s3n4jrsgyprymz808c4hi90n7swhacls-clash-verge-rev-2.5.8
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    if: github.repository == 'vertigo-red/nixpkgs'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out CI scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: ci
+
+      - name: Check out the isolated packaging revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE_REV }}
+          persist-credentials: false
+          path: source
+
+      - name: Prepare runner
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          sudo docker image prune --all --force
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends xvfb xauth dbus-x11
+          test -c /dev/kvm
+          sudo chmod a+rw /dev/kvm
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          df -h /
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            sandbox = true
+            max-jobs = 2
+            cores = 4
+            log-lines = 100
+
+      - name: Configure Cachix
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: nixpkgs-pr-build-test
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Protect the existing Clash Verge build before any uploads
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CACHIX_AUTH_TOKEN"
+          nix path-info --store "https://${CACHIX_CACHE}.cachix.org" "$CLASH_STORE_PATH"
+          nix-store --realise "$CLASH_STORE_PATH" --max-jobs 0
+          cachix pin "$CACHIX_CACHE" clash-verge-rev-2.5.8 "$CLASH_STORE_PATH"
+
+      - name: Build pinned frontend dependencies
+        run: |
+          set -euo pipefail
+          nix-build source -A metacubexd-desktop.pnpmDeps -o result-pnpm 2>&1 | tee pnpm-build.log
+
+      - name: Check Nix formatting
+        run: |
+          set -euo pipefail
+          nix-build source -A nixfmt -o formatter
+          formatter/bin/nixfmt --check \
+            source/pkgs/by-name/me/metacubexd-desktop/package.nix \
+            source/nixos/modules/programs/metacubexd-desktop.nix \
+            source/nixos/tests/metacubexd-desktop.nix
+
+      - name: Build package and run upstream tests in the sandbox
+        run: |
+          set -euo pipefail
+          nix-build source -A metacubexd-desktop -o result 2>&1 | tee package-build.log
+          test -x result/bin/metacubexd-desktop
+          test -x result/bin/metacubexd-helper
+          nix path-info --closure-size ./result
+
+      - name: Test the Electron UI and bundled backend
+        run: |
+          set -euo pipefail
+          node ci/.github/scripts/metacubexd-smoke.mjs "$(readlink -f result)/bin/metacubexd-desktop" "$RUNNER_TEMP/mcxd-smoke"
+
+      - name: Test NixOS helper capabilities and actual TUN
+        run: |
+          set -euo pipefail
+          nix-build source -A nixosTests.metacubexd-desktop -o result-nixos-test 2>&1 | tee nixos-test.log
+
+      - name: Publish and pin the verified package
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          store_path="$(readlink -f result)"
+          cachix push "$CACHIX_CACHE" "$store_path"
+          cachix pin "$CACHIX_CACHE" metacubexd-desktop-1.273.1 "$store_path"
+          nix path-info --option narinfo-cache-negative-ttl 0 --store "https://${CACHIX_CACHE}.cachix.org" "$store_path"
+          nix path-info --option narinfo-cache-negative-ttl 0 --store "https://${CACHIX_CACHE}.cachix.org" "$CLASH_STORE_PATH"
+          {
+            printf '## MetaCubeXD desktop 1.273.1\n\n'
+            printf 'Source revision: `%s`\n\n' "$SOURCE_REV"
+            printf 'Verified and published: `%s`\n\n' "$store_path"
+            printf 'Checks: sandbox build, upstream unit tests, Electron UI/backend smoke test, NixOS TUN VM test.\n\n'
+            printf 'Cachix: https://%s.cachix.org\n\n' "$CACHIX_CACHE"
+            printf 'Preserved and pinned: `%s`\n' "$CLASH_STORE_PATH"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep build and test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: metacubexd-desktop-logs
+          path: |
+            pnpm-build.log
+            package-build.log
+            nixos-test.log
+            ${{ runner.temp }}/mcxd-smoke/electron.log
+          if-no-files-found: ignore
+          retention-days: 14
