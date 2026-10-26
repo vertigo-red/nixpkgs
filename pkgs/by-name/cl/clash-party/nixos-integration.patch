@@ -1,0 +1,187 @@
+Subject: Integrate Nix-managed resources, updates and TUN capabilities
+
+Use the independently packaged Electron runtime, native sysproxy binding
+and three Mihomo cores. Preserve the production data directory and wrapper
+path when starting through Electron. Use NixOS-managed capabilities only
+on the core executables and keep ordinary proxy mode available to other
+users. Nix owns application and core updates instead of the GUI installer.
+
+Upstream-Status: Inappropriate [Nix-specific resource and privilege management]
+
+diff --git a/src/main/core/mihomoApi.ts b/src/main/core/mihomoApi.ts
+index a6aac3b..c95d3a1 100644
+--- a/src/main/core/mihomoApi.ts
++++ b/src/main/core/mihomoApi.ts
+@@ -432,6 +432,9 @@ export const mihomoGroupDelay = async (group: string, url?: string): Promise<IMi
+ }
+ 
+ export const mihomoUpgrade = async (): Promise<void> => {
++  if (process.env.CLASH_PARTY_RESOURCES) {
++    throw new Error('Update the packaged Mihomo cores through Nix.')
++  }
+   const instance = await getAxios()
+   return await instance.post('/upgrade', undefined, { timeout: 90000 })
+ }
+diff --git a/src/main/core/permissions.ts b/src/main/core/permissions.ts
+index a809b28..d625279 100644
+--- a/src/main/core/permissions.ts
++++ b/src/main/core/permissions.ts
+@@ -1,7 +1,7 @@
+ import { exec, execFile } from 'child_process'
+ import { promisify } from 'util'
+-import { stat } from 'fs/promises'
+-import { existsSync } from 'fs'
++import { access, stat } from 'fs/promises'
++import { constants, existsSync } from 'fs'
+ import path from 'path'
+ import { app, dialog, ipcMain } from 'electron'
+ import { getAppConfig, getControledMihomoConfig, patchControledMihomoConfig } from '../config'
+@@ -13,6 +13,7 @@ import { checkAdminPrivileges } from './admin'
+ 
+ const execPromise = promisify(exec)
+ const execFilePromise = promisify(execFile)
++const getcapPath = process.env.CLASH_PARTY_GETCAP || 'getcap'
+ 
+ // 内核名称白名单
+ const ALLOWED_CORES = ['mihomo', 'mihomo-alpha', 'mihomo-smart'] as const
+@@ -78,7 +79,13 @@ export async function checkMihomoCorePermissions(): Promise<boolean> {
+       return await checkAdminPrivileges()
+     }
+ 
+-    if (process.platform === 'darwin' || process.platform === 'linux') {
++    if (process.platform === 'linux') {
++      await access(corePath, constants.X_OK)
++      const { stdout } = await execFilePromise(getcapPath, [corePath])
++      return stdout.includes('cap_net_admin') && stdout.includes('cap_net_raw')
++    }
++
++    if (process.platform === 'darwin') {
+       const stats = await stat(corePath)
+       return (stats.mode & 0o4000) !== 0 && stats.uid === 0
+     }
+@@ -235,6 +242,12 @@ async function checkHighPrivilegeMihomoProcess(): Promise<boolean> {
+ }
+ 
+ export async function grantTunPermissions(): Promise<void> {
++  if (process.platform === 'linux') {
++    if (await checkMihomoCorePermissions()) return
++    throw new Error(
++      'Enable programs.clash-party.tunMode in NixOS and join its configured group, then log in again.'
++    )
++  }
+   const { core = 'mihomo' } = await getAppConfig()
+ 
+   if (!isValidCoreName(core)) {
+@@ -250,11 +263,6 @@ export async function grantTunPermissions(): Promise<void> {
+     await execFilePromise('osascript', ['-e', script])
+   }
+ 
+-  if (process.platform === 'linux') {
+-    await execFilePromise('pkexec', ['chown', 'root:root', corePath])
+-    await execFilePromise('pkexec', ['chmod', '+sx', corePath])
+-  }
+-
+   if (process.platform === 'win32') {
+     throw new Error('Windows platform requires running as administrator')
+   }
+diff --git a/src/main/resolve/autoUpdater.ts b/src/main/resolve/autoUpdater.ts
+index d4f917f..996261d 100644
+--- a/src/main/resolve/autoUpdater.ts
++++ b/src/main/resolve/autoUpdater.ts
+@@ -97,6 +97,7 @@ async function getGitHubAssetSha256(
+ }
+ 
+ export async function checkUpdate(): Promise<IAppVersion | undefined> {
++  if (process.env.CLASH_PARTY_RESOURCES) return undefined
+   const [{ 'mixed-port': mixedPort = DEFAULT_MIHOMO_PORTS.mixed }, { githubProxy = '' }] =
+     await Promise.all([getControledMihomoConfig(), getAppConfig()])
+   const githubUrl =
+@@ -138,6 +139,9 @@ function compareVersions(a: string, b: string): number {
+ }
+ 
+ export function downloadAndInstallUpdate(version: string): Promise<void> {
++  if (process.env.CLASH_PARTY_RESOURCES) {
++    return Promise.reject(new Error('Update Clash Party through Nix.'))
++  }
+   if (updateInstallPromise) return updateInstallPromise
+ 
+   updateInstallPromise = installUpdate(version).catch((error) => {
+diff --git a/src/main/utils/dirs.ts b/src/main/utils/dirs.ts
+index bea16c7..1c98918 100644
+--- a/src/main/utils/dirs.ts
++++ b/src/main/utils/dirs.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync } from 'fs'
++import { accessSync, constants, existsSync, mkdirSync } from 'fs'
+ import path from 'path'
+ import { is } from '@electron-toolkit/utils'
+ import { app } from 'electron'
+@@ -17,7 +17,11 @@ function portableDataDir(): string {
+ // `mihomo-party Safe Storage` Keychain item 或修改正式配置。已打包的 dev 预发行版
+ // 仍与正式版共享身份和数据，保持原有滚动升级路径。
+ export function configureAppPaths(): void {
+-  if (!app.isPackaged) {
++  // Nix runs the application with a separately packaged Electron runtime.
++  if (process.env.CLASH_PARTY_RESOURCES) {
++    app.setName('mihomo-party')
++    app.setPath('userData', path.join(app.getPath('appData'), 'mihomo-party'))
++  } else if (!app.isPackaged) {
+     app.setName('mihomo-party-dev')
+     app.setPath('userData', path.join(app.getPath('appData'), 'mihomo-party-dev'))
+   }
+@@ -58,10 +62,11 @@ export function exeDir(): string {
+ }
+ 
+ export function exePath(): string {
+-  return app.getPath('exe')
++  return process.env.CLASH_PARTY_EXECUTABLE || app.getPath('exe')
+ }
+ 
+ export function resourcesDir(): string {
++  if (process.env.CLASH_PARTY_RESOURCES) return process.env.CLASH_PARTY_RESOURCES
+   if (is.dev) {
+     return path.join(__dirname, '../../extra')
+   } else {
+@@ -86,6 +91,16 @@ export function mihomoCoreDir(): string {
+ }
+ 
+ export function mihomoCorePath(core: string): string {
++  // Restrict lookup to the named cores that the NixOS module exposes.
++  if (['mihomo', 'mihomo-alpha', 'mihomo-smart'].includes(core)) {
++    const wrapper = `/run/wrappers/bin/clash-party-${core}`
++    try {
++      accessSync(wrapper, constants.X_OK)
++      return wrapper
++    } catch {
++      // Users outside the TUN group can still use the unprivileged proxy core.
++    }
++  }
+   const isWin = process.platform === 'win32'
+   // 处理 Smart 内核
+   if (core === 'mihomo-smart') {
+diff --git a/src/main/utils/github.ts b/src/main/utils/github.ts
+index bf09002..c7cdacf 100644
+--- a/src/main/utils/github.ts
++++ b/src/main/utils/github.ts
+@@ -170,6 +170,9 @@ export async function downloadGitHubAsset(url: string, outputPath: string): Prom
+  * @param version 版本号
+  */
+ export async function installMihomoCore(version: string): Promise<void> {
++  if (process.env.CLASH_PARTY_RESOURCES) {
++    throw new Error('Update the packaged Mihomo cores through Nix.')
++  }
+   try {
+     log.info(`Installing mihomo core version ${version}`)
+ 
+diff --git a/src/native/sysproxy/index.js b/src/native/sysproxy/index.js
+index b0e0d3c..46b53ac 100644
+--- a/src/native/sysproxy/index.js
++++ b/src/native/sysproxy/index.js
+@@ -59,6 +59,7 @@ function getBindingName() {
+ }
+ 
+ function getResourcesPath() {
++  if (process.env.CLASH_PARTY_RESOURCES) return process.env.CLASH_PARTY_RESOURCES
+   // 开发环境：优先使用 process.cwd()
+   const cwd = process.cwd()
+   if (existsSync(join(cwd, 'extra', 'sidecar'))) {
