@@ -1118,6 +1118,11 @@ in
   meshtasticd = runTest ./networking/meshtasticd.nix;
   metabase = runTest ./metabase.nix;
   mihomo = runTest ./mihomo.nix;
+  mihomo-alpha = runTest {
+    imports = [ ./mihomo.nix ];
+    name = pkgs.lib.mkForce "mihomo-alpha";
+    nodes.machine.services.mihomo.package = pkgs.mihomo-alpha;
+  };
   mimir = runTest ./mimir.nix;
   mindustry = runTest ./mindustry.nix;
   minecraft-server = runTest ./minecraft-server.nix;
