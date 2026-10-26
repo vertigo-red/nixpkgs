@@ -31057,6 +31057,11 @@
     githubId = 1486626;
     name = "Artyom Pertsovsky";
   };
+  vertigo-red = {
+    name = "Dmitry Kobelev";
+    github = "vertigo-red";
+    githubId = 43450651;
+  };
   vglfr = {
     email = "vf.velt@gmail.com";
     github = "vglfr";
