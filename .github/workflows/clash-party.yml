@@ -1,0 +1,227 @@
+name: Build Clash Party and Mihomo cores
+run-name: Clash Party 2.0.4 and source-built Mihomo cores
+
+on:
+  push:
+    branches: [ci-builds]
+    paths:
+      - .github/workflows/clash-party.yml
+      - .github/scripts/clash-party-smoke.mjs
+
+permissions:
+  contents: read
+
+concurrency:
+  group: clash-party-cachix
+  cancel-in-progress: true
+
+env:
+  SOURCE_REV: 2f81bb8bb21e3b4905ee0882462fc61f7d597ee1
+  SOURCE_BASE_REV: d6471495b69e4c0054040c1e7d84258710293542
+  CACHIX_CACHE: nixpkgs-pr-build-test
+  CLASH_STORE_PATH: /nix/store/s3n4jrsgyprymz808c4hi90n7swhacls-clash-verge-rev-2.5.8
+  MCXD_STORE_PATH: /nix/store/iacxz7g7gbhlysx3kmmi9nk4lx23b32m-metacubexd-desktop-1.273.1
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    if: github.repository == 'vertigo-red/nixpkgs'
+    name: Build and test ${{ matrix.system }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - system: x86_64-linux
+            runner: ubuntu-24.04
+            vm_tests: true
+          - system: aarch64-linux
+            runner: ubuntu-24.04-arm
+            vm_tests: false
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 180
+    env:
+      SYSTEM: ${{ matrix.system }}
+    steps:
+      - name: Check cache configuration
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$CACHIX_AUTH_TOKEN" || { echo '::error::Repository secret CACHIX_AUTH_TOKEN is missing.'; exit 1; }
+          curl --fail --silent --show-error --retry 3 --connect-timeout 15 --max-time 60 \
+            "https://${CACHIX_CACHE}.cachix.org/nix-cache-info"
+
+      - name: Check out CI scripts
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          path: ci
+
+      - name: Check out the isolated packaging revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ env.SOURCE_REV }}
+          fetch-depth: 6
+          persist-credentials: false
+          path: source
+
+      - name: Check contribution metadata and the source-only recipes
+        run: |
+          set -euo pipefail
+          mapfile -t revisions < <(git -C source rev-list --reverse "$SOURCE_BASE_REV..HEAD")
+          test "${#revisions[@]}" -eq 5
+          test "$(git -C source show -s --format=%s "${revisions[0]}")" = 'maintainers: add vertigo-red'
+          for revision in "${revisions[@]}"; do
+            git -C source show -s --format=%B "$revision" \
+              | git interpret-trailers --parse \
+              | grep -E '^Assisted-by: Codex \(OpenAI GPT-6\)$'
+          done
+          # A unified patch's blank context line has one required leading space.
+          git -C source diff --check "$SOURCE_BASE_REV..HEAD" -- . ':!*.patch'
+          test ! -e source/pkgs/by-name/cl/clash-party/cores.nix
+          if rg 'lib\.fake(Hash|Sha256)|PACKAGING_REVISION' \
+            source/pkgs/by-name/cl/clash-party/*.nix \
+            source/pkgs/by-name/mi/mihomo-{alpha,smart}/package.nix; then
+            echo '::error::A source recipe contains a placeholder.'
+            exit 1
+          fi
+          grep -q 'Clash Party' source/nixos/doc/manual/release-notes/rl-2611.section.md
+
+      - name: Prepare runner
+        env:
+          RUN_VM_TESTS: ${{ matrix.vm_tests }}
+        run: |
+          set -euo pipefail
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /usr/local/.ghcup /opt/ghc /opt/hostedtoolcache/CodeQL
+          if command -v docker >/dev/null; then sudo docker image prune --all --force; fi
+          if ! command -v xvfb-run || ! command -v xauth || ! command -v dbus-run-session; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends xvfb xauth dbus-x11
+          fi
+          if [[ "$RUN_VM_TESTS" == true ]]; then
+            test -c /dev/kvm
+            sudo chmod a+rw /dev/kvm
+          fi
+          if sysctl -n kernel.apparmor_restrict_unprivileged_userns >/dev/null 2>&1; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          df -h /
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@448cde739abec1eaf0646249e3d25bb8d9bc7702 # v31.11.2
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+          extra_nix_config: |
+            sandbox = true
+            max-jobs = 2
+            cores = 4
+            log-lines = 100
+
+      - name: Configure Cachix
+        uses: cachix/cachix-action@38b082610b782e7e93e209c35fd730d399dee866 # v17
+        with:
+          name: nixpkgs-pr-build-test
+          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          skipPush: true
+
+      - name: Check the existing cached packages
+        run: |
+          set -euo pipefail
+          for path in "$CLASH_STORE_PATH" "$MCXD_STORE_PATH"; do
+            nix path-info --store "https://${CACHIX_CACHE}.cachix.org" "$path"
+          done
+          test "$(nix eval --impure --raw --expr builtins.currentSystem)" = "$SYSTEM"
+
+      - name: Check Nix formatting
+        run: |
+          set -euo pipefail
+          nix-build source -A nixfmt -o formatter
+          formatter/bin/nixfmt --check \
+            source/pkgs/by-name/cl/clash-party/*.nix \
+            source/pkgs/by-name/mi/mihomo-{alpha,smart}/package.nix \
+            source/nixos/modules/programs/clash-party.nix \
+            source/nixos/tests/clash-party.nix
+
+      - name: Build all three packages and run upstream checks in the sandbox
+        run: |
+          set -euo pipefail
+          nix-build source -A clash-party -o result 2>&1 | tee package-build.log
+          nix-build source -A mihomo-alpha -o result-alpha
+          nix-build source -A mihomo-smart -o result-smart
+          test -x result/bin/clash-party
+          result-alpha/bin/mihomo-alpha -v
+          result-smart/bin/mihomo-smart -v
+          for core in mihomo mihomo-alpha mihomo-smart; do
+            result/share/clash-party/resources/sidecar/$core -v
+          done
+          nix path-info --closure-size ./result ./result-alpha ./result-smart
+
+      - name: Test Electron UI, all three cores and bundled Sub-Store
+        run: |
+          set -euo pipefail
+          nix-build source -A nodejs -o node
+          node/bin/node ci/.github/scripts/clash-party-smoke.mjs \
+            "$(readlink -f result)/bin/clash-party" "$RUNNER_TEMP/clash-party-smoke"
+
+      - name: Test HTTP and SOCKS proxies, group access and all three TUN cores
+        if: matrix.vm_tests
+        run: |
+          set -euo pipefail
+          nix-build source \
+            -A nixosTests.mihomo-alpha \
+            -A nixosTests.mihomo-smart \
+            -A nixosTests.clash-party \
+            -o result-nixos-test 2>&1 | tee nixos-test.log
+
+      - name: Publish and pin the verified packages
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          RUN_VM_TESTS: ${{ matrix.vm_tests }}
+        run: |
+          set -euo pipefail
+          : > store-paths.txt
+          for item in 'result clash-party' 'result-alpha mihomo-alpha' 'result-smart mihomo-smart'; do
+            read -r link attribute <<< "$item"
+            store_path="$(readlink -f "$link")"
+            version="$(nix-instantiate --eval --strict --json source -A "$attribute.version" | jq -r .)"
+            cachix push "$CACHIX_CACHE" "$store_path"
+            cachix pin "$CACHIX_CACHE" "$attribute-$version-$SYSTEM" "$store_path"
+            nix path-info --option narinfo-cache-negative-ttl 0 \
+              --store "https://${CACHIX_CACHE}.cachix.org" "$store_path"
+            printf '%s %s\n' "$attribute" "$store_path" >> store-paths.txt
+          done
+          for path in "$CLASH_STORE_PATH" "$MCXD_STORE_PATH"; do
+            nix path-info --option narinfo-cache-negative-ttl 0 \
+              --store "https://${CACHIX_CACHE}.cachix.org" "$path"
+          done
+          # Markdown backticks are literal text, not shell command substitutions.
+          # shellcheck disable=SC2016
+          {
+            printf '## Source-built packages for %s\n\n' "$SYSTEM"
+            printf 'Packaging revision: `%s`\n\n' "$SOURCE_REV"
+            printf 'All cores are built from pinned source revisions.\n\n'
+            while read -r attribute store_path; do
+              printf -- '- `%s`: `%s`\n' "$attribute" "$store_path"
+            done < store-paths.txt
+            printf '\nChecks: Go unit tests, GUI formatting/lint/type checks and unit tests, Electron UI, three cores and Sub-Store.\n\n'
+            printf 'NixOS VM proxy/TUN tests executed on this runner: `%s`.\n\n' "$RUN_VM_TESTS"
+            printf 'Cache: https://%s.cachix.org\n\n' "$CACHIX_CACHE"
+            printf '```bash\nnix build --max-jobs 0 github:%s/%s#clash-party\n```\n' "$GITHUB_REPOSITORY" "$SOURCE_REV"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Keep build and test logs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: clash-party-logs-${{ matrix.system }}
+          path: |
+            package-build.log
+            nixos-test.log
+            store-paths.txt
+            ${{ runner.temp }}/clash-party-smoke/electron.log
+            ${{ runner.temp }}/clash-party-smoke/config/mihomo-party/logs
+          if-no-files-found: ignore
+          retention-days: 14
