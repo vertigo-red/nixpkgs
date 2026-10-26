@@ -31,6 +31,7 @@
   wrapGAppsHook3,
   gsettings-desktop-schemas,
   writableTmpDirAsHomeHook,
+  nixosTests,
   nix-update-script,
 }:
 
@@ -188,6 +189,7 @@ stdenv.mkDerivation (finalAttrs: {
       mihomo-smart
       sysproxy
       ;
+    tests.nixos = nixosTests.clash-party;
     updateScript = nix-update-script { };
   };
 
