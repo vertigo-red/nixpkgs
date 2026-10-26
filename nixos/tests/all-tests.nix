@@ -1123,6 +1123,11 @@ in
     name = pkgs.lib.mkForce "mihomo-alpha";
     nodes.machine.services.mihomo.package = pkgs.mihomo-alpha;
   };
+  mihomo-smart = runTest {
+    imports = [ ./mihomo.nix ];
+    name = pkgs.lib.mkForce "mihomo-smart";
+    nodes.machine.services.mihomo.package = pkgs.mihomo-smart;
+  };
   mimir = runTest ./mimir.nix;
   mindustry = runTest ./mindustry.nix;
   minecraft-server = runTest ./minecraft-server.nix;
