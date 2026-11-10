@@ -68,5 +68,8 @@ in
     ];
   };
 
-  meta.maintainers = pkgs.clash-party.meta.maintainers;
+  meta = {
+    maintainers = pkgs.clash-party.meta.maintainers;
+    doc = ./clash-party.md;
+  };
 }
