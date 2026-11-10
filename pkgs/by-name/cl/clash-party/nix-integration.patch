@@ -1,0 +1,243 @@
+Subject: Integrate Nix-managed resources and the unprivileged GUI
+
+Use the system Mihomo core and an optional NixOS capability wrapper for TUN.
+Keep application and core updates under the control of the package manager.
+Dereference resource symlinks when seeding writable user data.
+
+diff --git a/src/main/config/app.ts b/src/main/config/app.ts
+index f788b08..e78d4e4 100644
+--- a/src/main/config/app.ts
++++ b/src/main/config/app.ts
+@@ -35,6 +35,9 @@ export async function getAppConfig(force = false): Promise<IAppConfig> {
+       const data = await readFile(appConfigPath(), 'utf-8')
+       const parsedConfig = parse(data)
+       const mergedConfig = deepMerge(cloneDefaultConfig(), parsedConfig || {})
++      // The core is supplied by Nix, including when migrating an existing configuration.
++      mergedConfig.core = 'mihomo'
++      mergedConfig.enableSmartCore = false
+       // 配置文件已存在且来自旧版本时，沿用标准模式；只有新建配置保留首次选择门控。
+       if (parsedConfig && typeof parsedConfig === 'object' && !('modeSelected' in parsedConfig)) {
+         mergedConfig.modeSelected = true
+@@ -76,6 +79,8 @@ async function writeAppConfig(
+     if (replaceNameserverPolicy) {
+       nextConfig.nameserverPolicy = patch.nameserverPolicy ?? {}
+     }
++    nextConfig.core = 'mihomo'
++    nextConfig.enableSmartCore = false
+     nextConfig.maxLogFileSize = normalizeMaxLogFileSizeMB(nextConfig.maxLogFileSize)
+     try {
+       await atomicWriteFile(appConfigPath(), stringify(nextConfig))
+diff --git a/src/main/core/mihomoApi.ts b/src/main/core/mihomoApi.ts
+index a6aac3b..a31f9e8 100644
+--- a/src/main/core/mihomoApi.ts
++++ b/src/main/core/mihomoApi.ts
+@@ -432,6 +432,7 @@ export const mihomoGroupDelay = async (group: string, url?: string): Promise<IMi
+ }
+
+ export const mihomoUpgrade = async (): Promise<void> => {
++  if (process.platform === 'linux') throw new Error('Update the Mihomo core through Nix.')
+   const instance = await getAxios()
+   return await instance.post('/upgrade', undefined, { timeout: 90000 })
+ }
+diff --git a/src/main/core/permissions.ts b/src/main/core/permissions.ts
+index a809b28..6cb60cc 100644
+--- a/src/main/core/permissions.ts
++++ b/src/main/core/permissions.ts
+@@ -1,6 +1,6 @@
+ import { exec, execFile } from 'child_process'
+ import { promisify } from 'util'
+-import { stat } from 'fs/promises'
++import { realpath, stat } from 'fs/promises'
+ import { existsSync } from 'fs'
+ import path from 'path'
+ import { app, dialog, ipcMain } from 'electron'
+@@ -78,7 +78,14 @@ export async function checkMihomoCorePermissions(): Promise<boolean> {
+       return await checkAdminPrivileges()
+     }
+
+-    if (process.platform === 'darwin' || process.platform === 'linux') {
++    if (process.platform === 'linux') {
++      const { stdout } = await execFilePromise('@getcap@', [await realpath(corePath)])
++      return ['cap_net_admin', 'cap_net_raw', 'cap_net_bind_service'].every((cap) =>
++        stdout.includes(cap)
++      )
++    }
++
++    if (process.platform === 'darwin') {
+       const stats = await stat(corePath)
+       return (stats.mode & 0o4000) !== 0 && stats.uid === 0
+     }
+@@ -235,6 +242,10 @@ async function checkHighPrivilegeMihomoProcess(): Promise<boolean> {
+ }
+
+ export async function grantTunPermissions(): Promise<void> {
++  if (process.platform === 'linux') {
++    if (await checkMihomoCorePermissions()) return
++    throw new Error('Enable programs.clash-party.tunMode in your NixOS configuration to use TUN mode.')
++  }
+   const { core = 'mihomo' } = await getAppConfig()
+
+   if (!isValidCoreName(core)) {
+@@ -250,11 +261,6 @@ export async function grantTunPermissions(): Promise<void> {
+     await execFilePromise('osascript', ['-e', script])
+   }
+
+-  if (process.platform === 'linux') {
+-    await execFilePromise('pkexec', ['chown', 'root:root', corePath])
+-    await execFilePromise('pkexec', ['chmod', '+sx', corePath])
+-  }
+-
+   if (process.platform === 'win32') {
+     throw new Error('Windows platform requires running as administrator')
+   }
+diff --git a/src/main/resolve/autoUpdater.ts b/src/main/resolve/autoUpdater.ts
+index d4f917f..e0806d2 100644
+--- a/src/main/resolve/autoUpdater.ts
++++ b/src/main/resolve/autoUpdater.ts
+@@ -97,6 +97,7 @@ async function getGitHubAssetSha256(
+ }
+
+ export async function checkUpdate(): Promise<IAppVersion | undefined> {
++  if (process.platform === 'linux') return undefined
+   const [{ 'mixed-port': mixedPort = DEFAULT_MIHOMO_PORTS.mixed }, { githubProxy = '' }] =
+     await Promise.all([getControledMihomoConfig(), getAppConfig()])
+   const githubUrl =
+diff --git a/src/main/utils/dirs.ts b/src/main/utils/dirs.ts
+index bea16c7..08ccf98 100644
+--- a/src/main/utils/dirs.ts
++++ b/src/main/utils/dirs.ts
+@@ -1,4 +1,4 @@
+-import { existsSync, mkdirSync } from 'fs'
++import { accessSync, constants, existsSync, mkdirSync } from 'fs'
+ import path from 'path'
+ import { is } from '@electron-toolkit/utils'
+ import { app } from 'electron'
+@@ -58,7 +58,7 @@ export function exeDir(): string {
+ }
+
+ export function exePath(): string {
+-  return app.getPath('exe')
++  return '@executable@'
+ }
+
+ export function resourcesDir(): string {
+@@ -66,7 +66,7 @@ export function resourcesDir(): string {
+     return path.join(__dirname, '../../extra')
+   } else {
+     if (app.getAppPath().endsWith('asar')) {
+-      return process.resourcesPath
++      return '@resources@'
+     } else {
+       return path.join(app.getAppPath(), 'resources')
+     }
+@@ -86,6 +86,14 @@ export function mihomoCoreDir(): string {
+ }
+
+ export function mihomoCorePath(core: string): string {
++  if (process.platform === 'linux') {
++    try {
++      accessSync('@mihomoExecutable@', constants.X_OK)
++      return '@mihomoExecutable@'
++    } catch {
++      return '@mihomo@'
++    }
++  }
+   const isWin = process.platform === 'win32'
+   // 处理 Smart 内核
+   if (core === 'mihomo-smart') {
+diff --git a/src/main/utils/github.ts b/src/main/utils/github.ts
+index bf09002..970cc30 100644
+--- a/src/main/utils/github.ts
++++ b/src/main/utils/github.ts
+@@ -170,6 +170,7 @@ export async function downloadGitHubAsset(url: string, outputPath: string): Prom
+  * @param version 版本号
+  */
+ export async function installMihomoCore(version: string): Promise<void> {
++  if (process.platform === 'linux') throw new Error('Update the Mihomo core through Nix.')
+   try {
+     log.info(`Installing mihomo core version ${version}`)
+
+diff --git a/src/main/utils/init.ts b/src/main/utils/init.ts
+index 25fe6b6..f7bf2c7 100644
+--- a/src/main/utils/init.ts
++++ b/src/main/utils/init.ts
+@@ -224,7 +224,7 @@ async function initFiles(): Promise<void> {
+         if (!shouldCopy) return
+
+         try {
+-          await cp(sourcePath, targetPath, { recursive: true, force: true })
++          await cp(sourcePath, targetPath, { recursive: true, force: true, dereference: true })
+         } catch (error: unknown) {
+           const code = (error as NodeJS.ErrnoException).code
+           // 文件被占用或权限问题，如果目标已存在则跳过
+@@ -241,7 +241,7 @@ async function initFiles(): Promise<void> {
+           if (code !== 'ENOENT') throw error
+           await initLogger.warn(`Retrying ${file}: target changed while copying`)
+           await new Promise((resolve) => setTimeout(resolve, 100))
+-          await cp(sourcePath, targetPath, { recursive: true, force: true })
++          await cp(sourcePath, targetPath, { recursive: true, force: true, dereference: true })
+         }
+       })
+     )
+diff --git a/src/main/utils/template.ts b/src/main/utils/template.ts
+index 67a6089..7c30f4a 100644
+--- a/src/main/utils/template.ts
++++ b/src/main/utils/template.ts
+@@ -47,7 +47,7 @@ export const defaultConfig: IAppConfig = {
+   autoQuitWithoutCoreMode: 'core',
+   proxyDisplayMode: 'simple',
+   proxyDisplayOrder: 'default',
+-  autoCheckUpdate: true,
++  autoCheckUpdate: false,
+   autoUpdateProfileOnStart: true,
+   silentUpdate: true,
+   autoCloseConnection: true,
+diff --git a/src/native/sysproxy/index.js b/src/native/sysproxy/index.js
+index b0e0d3c..b8ad359 100644
+--- a/src/native/sysproxy/index.js
++++ b/src/native/sysproxy/index.js
+@@ -59,6 +59,7 @@ function getBindingName() {
+ }
+
+ function getResourcesPath() {
++  if (platform === 'linux') return '@resources@'
+   // 开发环境：优先使用 process.cwd()
+   const cwd = process.cwd()
+   if (existsSync(join(cwd, 'extra', 'sidecar'))) {
+diff --git a/src/renderer/src/pages/mihomo.tsx b/src/renderer/src/pages/mihomo.tsx
+index 18cc0f3..7c03e7c 100644
+--- a/src/renderer/src/pages/mihomo.tsx
++++ b/src/renderer/src/pages/mihomo.tsx
+@@ -368,6 +368,7 @@ const Mihomo: React.FC = () => {
+               <Switch
+                 size="sm"
+                 isSelected={enableSmartCore}
++                isDisabled
+                 color={enableSmartCore ? 'primary' : 'default'}
+                 onValueChange={async (v) => {
+                   await patchAppConfig({ enableSmartCore: v })
+@@ -426,6 +427,7 @@ const Mihomo: React.FC = () => {
+                     size="sm"
+                     isIconOnly
+                     title={t('mihomo.upgradeCore')}
++                    isDisabled
+                     variant="light"
+                     isLoading={upgrading}
+                     onPress={async () => {
+@@ -453,7 +455,7 @@ const Mihomo: React.FC = () => {
+                   >
+                     <IoMdCloudDownload className="text-lg" />
+                   </Button>
+-                  <Button size="sm" variant="light" onPress={handleOpenModal}>
++                  <Button size="sm" variant="light" onPress={handleOpenModal} isDisabled>
+                     {t('mihomo.selectSpecificVersion')}
+                   </Button>
+                 </div>
+@@ -469,6 +471,7 @@ const Mihomo: React.FC = () => {
+                 className="w-37.5"
+                 size="sm"
+                 aria-label={t('mihomo.selectCoreVersion')}
++                isDisabled
+                 selectedKeys={new Set([core])}
+                 disallowEmptySelection={true}
+                 onSelectionChange={async (v) => {

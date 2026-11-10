@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/x-clash-party-plugin">
+    <comment>Clash Party airport plugin descriptor</comment>
+    <glob pattern="*.cpx"/>
+  </mime-type>
+</mime-info>
